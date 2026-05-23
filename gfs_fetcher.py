@@ -21,16 +21,6 @@ import xarray as xr
 from herbie import Herbie
 
 
-# Herbie GRIB search strings for each field we need
-GFS_SEARCH = {
-    "mlcape":   r":CAPE:180-0 mb above ground:",
-    "mlcin":    r":CIN:180-0 mb above ground:",
-    "srh_03":   r":HLCY:3000-0 m above ground:",
-    "ushear":   r":VUCSH:0-6000 m above ground:",
-    "vshear":   r":VVCSH:0-6000 m above ground:",
-}
-
-
 def find_latest_gfs_run(target_valid_time: pd.Timestamp):
     """
     Find the most recent GFS cycle that can forecast the target valid time.
@@ -43,7 +33,7 @@ def find_latest_gfs_run(target_valid_time: pd.Timestamp):
     (run_init, fxx) : (pd.Timestamp, int)
         Init time of the run to use, and forecast hour from that run.
     """
-    now = pd.Timestamp.utcnow().tz_localize(None)
+    now = pd.Timestamp.now('UTC').tz_localize(None)
     target = target_valid_time.tz_localize(None) if target_valid_time.tzinfo else target_valid_time
 
     for hours_back in range(0, 60, 6):
@@ -61,30 +51,12 @@ def find_latest_gfs_run(target_valid_time: pd.Timestamp):
     )
 
 
-def _open_field(H, search_str, var_name):
-    """
-    Pull a single field from a Herbie object via GRIB search string.
-    Returns the field as a 2D xr.DataArray named `var_name`.
-    """
-    ds = H.xarray(search_str, remove_grib=False)
-    # Herbie may return a Dataset or list of Datasets depending on matches.
-    if isinstance(ds, list):
-        if len(ds) == 0:
-            raise RuntimeError(f"No match for search '{search_str}'")
-        ds = ds[0]
-
-    # Pick the first data variable (there should be exactly one)
-    data_vars = list(ds.data_vars)
-    if len(data_vars) == 0:
-        raise RuntimeError(f"No data variables in result for '{search_str}'")
-    arr = ds[data_vars[0]].squeeze()
-    arr.name = var_name
-    return arr
-
-
 def fetch_gfs(target_valid_time: pd.Timestamp) -> xr.Dataset:
     """
     Fetch all GFS fields needed for SCP at target_valid_time.
+
+    Downloads the full GRIB2 file and extracts needed fields to avoid
+    cfgrib caching issues on GitHub Actions.
 
     Returns
     -------
@@ -109,21 +81,72 @@ def fetch_gfs(target_valid_time: pd.Timestamp) -> xr.Dataset:
         fxx=fxx,
     )
 
+    # Download the full file and open it once (avoids cfgrib caching issues)
+    try:
+        ds_full = H.xarray(remove_grib=False)
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch GFS GRIB2 file: {e}")
+
+    # Extract and rename the fields we need by looking for them by name
     fields = {}
-    for name, search in GFS_SEARCH.items():
-        fields[name] = _open_field(H, search, name)
+    
+    # MLCAPE
+    cape_var = None
+    for var in ds_full.data_vars:
+        if 'cape' in var.lower():
+            cape_var = var
+            break
+    if cape_var:
+        fields['mlcape'] = ds_full[cape_var].squeeze()
+    else:
+        raise RuntimeError("MLCAPE not found in GFS output")
 
-    # Combine shear u/v into magnitude
-    ushear = fields.pop("ushear")
-    vshear = fields.pop("vshear")
-    shear_06 = np.sqrt(ushear ** 2 + vshear ** 2)
-    shear_06.name = "shear_06"
+    # MLCIN
+    cin_var = None
+    for var in ds_full.data_vars:
+        if 'cin' in var.lower():
+            cin_var = var
+            break
+    if cin_var:
+        fields['mlcin'] = ds_full[cin_var].squeeze()
+    else:
+        raise RuntimeError("MLCIN not found in GFS output")
 
+    # 0-3km SRH (HLCY)
+    srh_var = None
+    for var in ds_full.data_vars:
+        if 'hlcy' in var.lower() or 'helicity' in var.lower():
+            srh_var = var
+            break
+    if srh_var:
+        fields['srh_03'] = ds_full[srh_var].squeeze()
+    else:
+        raise RuntimeError("0-3km SRH (HLCY) not found in GFS output")
+
+    # 0-6km shear u/v components
+    ushear_var = None
+    vshear_var = None
+    for var in ds_full.data_vars:
+        if 'vucsh' in var.lower():
+            ushear_var = var
+        elif 'vvcsh' in var.lower():
+            vshear_var = var
+    
+    if ushear_var and vshear_var:
+        ushear = ds_full[ushear_var].squeeze()
+        vshear = ds_full[vshear_var].squeeze()
+        shear_06 = np.sqrt(ushear ** 2 + vshear ** 2)
+        shear_06.name = "shear_06"
+        fields['shear_06'] = shear_06
+    else:
+        raise RuntimeError("0-6km shear (VUCSH/VVCSH) not found in GFS output")
+
+    # Combine into output Dataset
     ds = xr.Dataset({
-        "mlcape":  fields["mlcape"],
-        "mlcin":   fields["mlcin"],
-        "srh_03":  fields["srh_03"],
-        "shear_06": shear_06,
+        "mlcape":   fields["mlcape"],
+        "mlcin":    fields["mlcin"],
+        "srh_03":   fields["srh_03"],
+        "shear_06": fields["shear_06"],
     })
 
     ds.attrs.update({

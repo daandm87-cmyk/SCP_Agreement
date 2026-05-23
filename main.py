@@ -43,7 +43,7 @@ def default_valid_time() -> pd.Timestamp:
     Default target: the next Monday at 00Z (capturing Sunday peak
     convection in the central US).
     """
-    now = pd.Timestamp.utcnow().tz_localize(None).floor("h")
+    now = pd.Timestamp.now('UTC').tz_localize(None).floor("h")
     # weekday(): Mon=0 ... Sun=6
     days_until_monday = (0 - now.weekday()) % 7
     if days_until_monday == 0 and now.hour >= 0:
