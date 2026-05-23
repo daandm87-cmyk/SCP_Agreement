@@ -1,0 +1,61 @@
+name: Generate SCP Agreement map
+
+# Manual trigger from the Actions tab. An optional valid_time input lets
+# you target a specific UTC valid time; otherwise the default in main.py
+# (next Monday 00Z) is used.
+on:
+  workflow_dispatch:
+    inputs:
+      valid_time:
+        description: "Target valid time (UTC, ISO format, e.g. 2026-05-25T00:00:00). Leave blank for default."
+        required: false
+        default: ""
+
+# Allow workflow to push back to repo
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Miniforge / conda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: scp_agreement
+          environment-file: environment.yml
+          auto-activate: true
+          auto-update-conda: false
+
+      - name: Print environment info
+        shell: bash -el {0}
+        run: |
+          conda info
+          conda list
+
+      - name: Run pipeline
+        shell: bash -el {0}
+        run: |
+          if [ -n "${{ github.event.inputs.valid_time }}" ]; then
+            python main.py --valid-time "${{ github.event.inputs.valid_time }}"
+          else
+            python main.py
+          fi
+
+      - name: Commit and push outputs
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/index.html docs/map.png
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update SCP_Agreement map $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
