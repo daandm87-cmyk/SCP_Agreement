@@ -93,7 +93,7 @@ def render_map(mscp, agreement_count, n_models_total,
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # Build agreement-driven alpha mask
+    # Build alpha mask from model agreement
     alpha = alpha_from_agreement(agreement_count, n_models_total)
 
     # Set up figure with Lambert Conformal projection
@@ -113,40 +113,29 @@ def render_map(mscp, agreement_count, n_models_total,
     ax.add_feature(cfeature.BORDERS.with_scale("50m"),
                    edgecolor="#444", linewidth=0.6, zorder=2)
 
-    # Color setup
+    # Color setup. set_under('none') ensures values < first boundary are
+    # rendered transparent rather than falling back to the first color.
     cmap = ListedColormap(SCP_COLORS)
+    cmap.set_under("none")
     norm = BoundaryNorm(SCP_BOUNDS, ncolors=len(SCP_COLORS), extend="max")
 
-    # Create a 2D mesh grid for lon/lat if needed
+    # 2D mesh grid for lon/lat
     if lons.ndim == 1 and lats.ndim == 1:
         lon2d, lat2d = np.meshgrid(lons, lats)
     else:
         lon2d, lat2d = lons, lats
 
-    # Plot mSCP shading with per-pixel alpha
-    # Approach: pcolormesh with shading, then multiply alpha into the RGBA image.
-    # Simplest robust approach: render mscp shading first into RGBA, then
-    # combine alpha array and overlay.
-    rgba = cmap(norm(mscp))           # (lat, lon, 4)
-    rgba[..., 3] = alpha               # apply our alpha map
+    # Mask: hide cells where no model agrees OR mSCP is below the lowest bound.
+    # pcolormesh treats masked cells as transparent.
+    mask = (alpha == 0) | (mscp < SCP_BOUNDS[0])
+    mscp_masked = np.ma.masked_array(mscp, mask=mask)
 
     ax.pcolormesh(
-        lon2d, lat2d, mscp,
+        lon2d, lat2d, mscp_masked,
         cmap=cmap, norm=norm,
         transform=ccrs.PlateCarree(),
         shading="auto",
-        alpha=None,
         rasterized=True,
-    )
-    # Overlay the alpha-masked image on top so transparency is honored
-    # (the pcolormesh above gives the discrete shading; the imshow-like
-    # alpha overlay handles transparency from agreement)
-    ax.imshow(
-        rgba,
-        origin="upper",
-        extent=[lon2d.min(), lon2d.max(), lat2d.min(), lat2d.max()],
-        transform=ccrs.PlateCarree(),
-        interpolation="nearest",
         zorder=3,
     )
 

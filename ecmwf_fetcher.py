@@ -85,7 +85,7 @@ def fetch_ecmwf(target_valid_time: pd.Timestamp,
     Fetch ECMWF fields and derive SRH/shear.
 
     Returns xr.Dataset with same schema as GFS fetcher:
-        mlcape   (J/kg)     -- ECMWF entire-atmosphere CAPE as MLCAPE proxy
+        mlcape   (J/kg)     -- ECMWF MUCAPE (more correct for SCP than MLCAPE)
         mlcin    (J/kg)     -- all NaN; ECMWF Open Data has no CIN
         srh_03   (m^2/s^2)  -- derived from pressure-level winds
         shear_06 (m/s)      -- derived from 500mb and 10m winds
@@ -101,13 +101,14 @@ def fetch_ecmwf(target_valid_time: pd.Timestamp,
     with tempfile.TemporaryDirectory(prefix="ecmwf_") as tmpdir:
         tmp = Path(tmpdir)
 
-        # Download surface fields (CAPE + 10m winds)
+        # Download surface fields (MUCAPE + 10m winds)
+        # ECMWF Open Data names this 'mucape', not 'cape'.
         sfc_path = tmp / "sfc.grib2"
         client.retrieve(
             target=str(sfc_path),
             date=date_str, time=time_int, step=step,
             type="fc", levtype="sfc",
-            param=["cape", "10u", "10v"],
+            param=["mucape", "10u", "10v"],
         )
 
         # Download pressure-level u, v, gh
@@ -127,8 +128,8 @@ def fetch_ecmwf(target_valid_time: pd.Timestamp,
         print(f"[ECMWF] surface: {len(sfc_datasets)} hypercubes, "
               f"pressure-level: {len(pl_datasets)} hypercubes")
 
-        # Find surface fields
-        cape = _find_var(sfc_datasets, ["cape"])
+        # Find surface fields (mucape comes through as 'mucape' from cfgrib)
+        cape = _find_var(sfc_datasets, ["mucape", "cape"])
         u10 = _find_var(sfc_datasets, ["u10", "10u"])
         v10 = _find_var(sfc_datasets, ["v10", "10v"])
 
