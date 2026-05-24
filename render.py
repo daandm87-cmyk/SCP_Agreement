@@ -40,7 +40,8 @@ SCP_COLORS = [
     "#f4d300",  # 10-14   yellow
     "#f08a00",  # 14-18   orange
     "#e23a1d",  # 18-24   red
-    "#8e1f1f",  # 24-30+  deep red
+    "#8e1f1f",  # 24-30   deep red
+    "#4a0f0f",  # 30+     extend-max color (off the chart)
 ]
 
 
