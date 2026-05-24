@@ -6,19 +6,13 @@ GFS run that can forecast the target valid time. Returns an xarray
 Dataset with standardized variable names.
 
 Fields pulled (from GFS pgrb2.0p25):
-    - MLCAPE  (180-0 mb above ground, "pressureFromGroundLayer" type)
-    - MLCIN   (180-0 mb above ground, same)
+    - MLCAPE  (180-0 mb above ground)
+    - MLCIN   (180-0 mb above ground)
     - 0-3km storm-relative helicity (HLCY 3000-0 m above ground)
-    - 0-6km bulk shear u/v (VUCSH/VVCSH 0-6000 m above ground)
+    - 0-6km bulk shear u/v components (VUCSH/VVCSH)
 
-Strategy:
-    - Download a subset GRIB file containing only these 5 fields in one
-      Herbie call (combined regex search).
-    - Open the local file directly with cfgrib.open_datasets() to avoid
-      Herbie's internal cache-path quirks that were failing before.
-    - cfgrib returns a list of Datasets (one per "hypercube" of compatible
-      level types). Iterate and match each desired field by GRIB shortName
-      plus level metadata.
+This version logs detailed inventory diagnostics so we can see exactly
+what's in the file if anything is missing.
 
 LFC is NOT in standard GFS GRIB output, so the LFC factor correction
 is deferred to a later version. v1 uses CIN only.
@@ -31,26 +25,31 @@ import cfgrib
 from herbie import Herbie
 
 
-# Combined regex matching all 5 fields we need
-GFS_COMBINED_SEARCH = (
+# Several alternative search strings for the 0-6 km bulk shear lines.
+# The exact text in GFS inventories has varied across GFS versions, so we
+# try a list and use whichever yields a match.
+SHEAR_SEARCH_OPTIONS = [
+    # Standard pgrb2.0p25 notation
+    r":VUCSH:6000-0 m above ground:|:VVCSH:6000-0 m above ground:",
+    r":VUCSH:0-6000 m above ground:|:VVCSH:0-6000 m above ground:",
+    # Looser variants
+    r":VUCSH:.*6000.*m above ground:|:VVCSH:.*6000.*m above ground:",
+    # Even looser - any VUCSH/VVCSH at all (last resort, returns all layers)
+    r":VUCSH:|:VVCSH:",
+]
+
+# Base search for the non-shear fields
+GFS_BASE_SEARCH = (
     r":CAPE:180-0 mb above ground:"
     r"|:CIN:180-0 mb above ground:"
     r"|:HLCY:3000-0 m above ground:"
-    r"|:VUCSH:0-6000 m above ground:"
-    r"|:VVCSH:0-6000 m above ground:"
 )
 
 
 def find_latest_gfs_run(target_valid_time: pd.Timestamp):
     """
-    Find the most recent GFS cycle that can forecast the target valid time.
-
-    GFS runs at 00, 06, 12, 18 UTC and we conservatively assume ~5 hours of
-    processing lag before files are reliably available on NOMADS/AWS.
-
-    Returns
-    -------
-    (run_init, fxx) : (pd.Timestamp, int)
+    Most recent GFS cycle that can forecast the target valid time.
+    GFS runs at 00, 06, 12, 18 UTC, with ~5 hours processing lag.
     """
     now = pd.Timestamp.now('UTC').tz_localize(None)
     target = target_valid_time.tz_localize(None) if target_valid_time.tzinfo else target_valid_time
@@ -70,9 +69,7 @@ def find_latest_gfs_run(target_valid_time: pd.Timestamp):
 
 
 def _open_grib_as_list(grib_path):
-    """
-    Open a GRIB file with cfgrib and always return a list of Datasets.
-    """
+    """Open a GRIB file with cfgrib and always return a list of Datasets."""
     result = cfgrib.open_datasets(
         str(grib_path),
         backend_kwargs={"indexpath": ""},
@@ -82,69 +79,72 @@ def _open_grib_as_list(grib_path):
     return result
 
 
-def _attrs(da):
-    """Convenience to grab GRIB metadata attrs from a DataArray."""
-    return da.attrs
-
-
-def _matches_level(da, type_of_level, top_level, bottom_level=0):
+def _dump_inventory_diagnostics(H):
     """
-    Check if a DataArray's GRIB level metadata matches the target layer.
-
-    GRIB stores topLevel/bottomLevel in different units depending on the
-    type-of-level (mb*100 for pressureFromGroundLayer, meters for
-    heightAboveGroundLayer). We test both common encodings to be safe.
+    Print every inventory entry matching wind/shear/CAPE-related patterns
+    so we can see exactly what's in this GFS run's GRIB file.
     """
-    a = da.attrs
-    if a.get("GRIB_typeOfLevel") != type_of_level:
-        return False
-    top = a.get("GRIB_topLevel")
-    bot = a.get("GRIB_bottomLevel")
-    # Accept multiple plausible unit encodings (e.g. 180 vs 18000 for mb)
-    top_match = top in (top_level, top_level * 100)
-    bot_match = bot == bottom_level
-    return top_match and bot_match
+    try:
+        inv = H.inventory()
+    except Exception as e:
+        print(f"[GFS DEBUG] Could not load inventory: {e}")
+        return
+
+    print(f"[GFS DEBUG] Inventory has {len(inv)} total entries")
+    print(f"[GFS DEBUG] Inventory columns: {list(inv.columns)}")
+
+    # Find the column with the searchable text
+    search_col = None
+    for cand in ("search_this", "variable", "search", "name"):
+        if cand in inv.columns:
+            search_col = cand
+            break
+    if search_col is None:
+        search_col = inv.columns[-1]
+        print(f"[GFS DEBUG] No conventional search column found; using '{search_col}'")
+    else:
+        print(f"[GFS DEBUG] Using search column: '{search_col}'")
+
+    # Dump matches for each pattern of interest
+    patterns = ["CAPE", "CIN", "HLCY", "VUCSH", "VVCSH", "VWSH", "CSH", "shear"]
+    for pat in patterns:
+        matches = inv[inv[search_col].astype(str).str.contains(
+            pat, na=False, regex=False
+        )]
+        print(f"[GFS DEBUG] '{pat}' -> {len(matches)} inventory entries")
+        for s in matches[search_col].head(8).tolist():
+            print(f"[GFS DEBUG]      '{s}'")
 
 
-def _find_field(datasets, short_name_options, level_check):
+def _try_download(H, search_str, label):
     """
-    Search a list of cfgrib Datasets for a field matching a short name
-    AND a level criterion. Returns the matched DataArray or None.
+    Attempt a Herbie subset download with a search string. Returns the
+    local file path on success, None on failure.
+    """
+    try:
+        local_path = H.download(search=search_str, verbose=False)
+        print(f"[GFS] {label}: subset downloaded -> {local_path}")
+        return local_path
+    except Exception as e:
+        print(f"[GFS] {label}: subset failed ({e})")
+        return None
+
+
+def _find_field_by_name(datasets, short_name_options):
+    """
+    Find a field by short name. We rely on the search regex having already
+    filtered to the right layer so name alone is sufficient.
     """
     for ds in datasets:
         for var_name in ds.data_vars:
-            if var_name.lower() not in short_name_options:
-                continue
-            da = ds[var_name]
-            if level_check(da):
-                return da.squeeze()
+            if var_name.lower() in {s.lower() for s in short_name_options}:
+                return ds[var_name].squeeze()
     return None
-
-
-def _debug_dump(datasets, label):
-    """Print every variable + level metadata from each Dataset for debugging."""
-    print(f"[GFS DEBUG] ===== {label} =====")
-    print(f"[GFS DEBUG] Total datasets: {len(datasets)}")
-    for i, ds in enumerate(datasets):
-        for vn in ds.data_vars:
-            attrs = ds[vn].attrs
-            tol = attrs.get("GRIB_typeOfLevel", "?")
-            top = attrs.get("GRIB_topLevel", "?")
-            bot = attrs.get("GRIB_bottomLevel", "?")
-            print(f"[GFS DEBUG]  [{i}] {vn} | typeOfLevel={tol} | top={top} bot={bot}")
 
 
 def fetch_gfs(target_valid_time: pd.Timestamp) -> xr.Dataset:
     """
     Fetch all GFS fields needed for SCP at target_valid_time.
-
-    Returns
-    -------
-    xr.Dataset with variables:
-        mlcape   (J/kg)
-        mlcin    (J/kg, negative)
-        srh_03   (m^2/s^2)
-        shear_06 (m/s, magnitude)
     """
     target = pd.Timestamp(target_valid_time)
     run_init, fxx = find_latest_gfs_run(target)
@@ -157,61 +157,59 @@ def fetch_gfs(target_valid_time: pd.Timestamp) -> xr.Dataset:
         fxx=fxx,
     )
 
-    # Download subset first, fall back to full file if subset fails
-    try:
-        local_path = H.download(search=GFS_COMBINED_SEARCH, verbose=False)
-        print(f"[GFS] Subset downloaded: {local_path}")
-        datasets = _open_grib_as_list(local_path)
-    except Exception as e:
-        print(f"[GFS] Subset download/open failed ({e}); falling back to full file")
-        local_path = H.download(verbose=False)
-        print(f"[GFS] Full file downloaded: {local_path}")
-        datasets = _open_grib_as_list(local_path)
+    # Always dump diagnostics so we know what's in the file
+    _dump_inventory_diagnostics(H)
 
-    print(f"[GFS] Parsed {len(datasets)} hypercubes from GRIB")
+    # --- Step 1: download base fields (cape, cin, hlcy) ---
+    base_path = _try_download(H, GFS_BASE_SEARCH, "base fields")
+    if base_path is None:
+        raise RuntimeError("GFS base-fields subset download failed")
+    base_datasets = _open_grib_as_list(base_path)
 
-    # --- Match each field by shortName + level metadata ---
+    mlcape = _find_field_by_name(base_datasets, ["cape", "mlcape"])
+    mlcin  = _find_field_by_name(base_datasets, ["cin", "mlcin"])
+    srh_03 = _find_field_by_name(base_datasets, ["hlcy", "helicity"])
 
-    mlcape = _find_field(
-        datasets,
-        {"cape", "mlcape"},
-        lambda da: _matches_level(da, "pressureFromGroundLayer", 180, 0),
-    )
-    mlcin = _find_field(
-        datasets,
-        {"cin", "mlcin"},
-        lambda da: _matches_level(da, "pressureFromGroundLayer", 180, 0),
-    )
-    srh_03 = _find_field(
-        datasets,
-        {"hlcy", "helicity"},
-        lambda da: _matches_level(da, "heightAboveGroundLayer", 3000, 0),
-    )
-    ushear = _find_field(
-        datasets,
-        {"vucsh", "u_shr", "ushear"},
-        lambda da: _matches_level(da, "heightAboveGroundLayer", 6000, 0),
-    )
-    vshear = _find_field(
-        datasets,
-        {"vvcsh", "v_shr", "vshear"},
-        lambda da: _matches_level(da, "heightAboveGroundLayer", 6000, 0),
-    )
-
-    # Validate we got everything
-    found = {
-        "mlcape":  mlcape,
-        "mlcin":   mlcin,
-        "srh_03":  srh_03,
-        "ushear":  ushear,
-        "vshear":  vshear,
-    }
-    missing = [k for k, v in found.items() if v is None]
-    if missing:
-        _debug_dump(datasets, "Available variables in GFS GRIB")
+    if mlcape is None or mlcin is None or srh_03 is None:
+        print("[GFS DEBUG] base datasets contents:")
+        for i, ds in enumerate(base_datasets):
+            for vn in ds.data_vars:
+                print(f"[GFS DEBUG]   [{i}] {vn}")
         raise RuntimeError(
-            f"Could not find these GFS fields after parsing: {missing}. "
-            f"See [GFS DEBUG] output above for what's actually in the file."
+            f"Could not find base fields. "
+            f"mlcape={mlcape is not None}, "
+            f"mlcin={mlcin is not None}, "
+            f"srh_03={srh_03 is not None}"
+        )
+
+    # --- Step 2: download shear fields, trying multiple search variants ---
+    ushear = None
+    vshear = None
+    for i, shear_search in enumerate(SHEAR_SEARCH_OPTIONS):
+        print(f"[GFS] Trying shear search variant {i+1}/{len(SHEAR_SEARCH_OPTIONS)}: "
+              f"{shear_search!r}")
+        shear_path = _try_download(H, shear_search, f"shear v{i+1}")
+        if shear_path is None:
+            continue
+        shear_datasets = _open_grib_as_list(shear_path)
+        print(f"[GFS] shear v{i+1}: parsed {len(shear_datasets)} hypercubes")
+        for j, ds in enumerate(shear_datasets):
+            for vn in ds.data_vars:
+                print(f"[GFS DEBUG]   shear[{j}] {vn}")
+
+        ushear = _find_field_by_name(shear_datasets, ["vucsh", "u_shr", "ushear"])
+        vshear = _find_field_by_name(shear_datasets, ["vvcsh", "v_shr", "vshear"])
+
+        if ushear is not None and vshear is not None:
+            print(f"[GFS] shear found with variant {i+1}")
+            break
+
+    if ushear is None or vshear is None:
+        raise RuntimeError(
+            f"Could not find shear fields after trying {len(SHEAR_SEARCH_OPTIONS)} "
+            f"search variants. ushear={ushear is not None}, "
+            f"vshear={vshear is not None}. See [GFS DEBUG] above to see what's in "
+            f"the inventory."
         )
 
     # Combine shear u/v into magnitude
@@ -224,7 +222,6 @@ def fetch_gfs(target_valid_time: pd.Timestamp) -> xr.Dataset:
         "srh_03":   srh_03,
         "shear_06": shear_06,
     })
-
     ds_out.attrs.update({
         "model": "gfs",
         "run_init": str(run_init),
