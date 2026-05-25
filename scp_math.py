@@ -187,7 +187,69 @@ def compute_bulk_shear(u_low, v_low, u_high, v_high):
 
 
 # ============================================================================
-# Grid-wise SRH/shear from pressure-level winds (vectorized for ECMWF grid)
+# Region subsetting (cheap pre-filter before SRH derivation)
+# ============================================================================
+
+def subset_to_region(lat, lon, lat_range, lon_range, arrays):
+    """
+    Crop arrays to a lat/lon bounding box. Massive speedup for the pure-Python
+    grid_derive_srh_and_shear() loop when only a regional subset is needed.
+
+    Handles both lat orderings (ascending or descending) and both lon
+    conventions ([-180, 180] or [0, 360]) by normalizing for comparison
+    but returning the original lon values intact.
+
+    Parameters
+    ----------
+    lat, lon : 1D arrays
+        Latitude and longitude coordinates.
+    lat_range : (min_lat, max_lat) in degrees, e.g. (20, 55)
+    lon_range : (min_lon, max_lon) in degrees, [-180, 180] convention
+    arrays : dict[str, ndarray]
+        Arrays to subset. 2D arrays are treated as (lat, lon); 3D arrays
+        are treated as (level, lat, lon).
+
+    Returns
+    -------
+    sub_lat, sub_lon : 1D arrays
+    sub_arrays : dict[str, ndarray]
+    """
+    lat = np.asarray(lat)
+    lon = np.asarray(lon)
+
+    # Normalize lon to [-180, 180] for comparison only
+    lon_norm = np.where(lon > 180, lon - 360, lon)
+
+    lat_mask = (lat >= lat_range[0]) & (lat <= lat_range[1])
+    lon_mask = (lon_norm >= lon_range[0]) & (lon_norm <= lon_range[1])
+
+    lat_idx = np.where(lat_mask)[0]
+    lon_idx = np.where(lon_mask)[0]
+    if len(lat_idx) == 0 or len(lon_idx) == 0:
+        raise ValueError(
+            f"No grid points found in region "
+            f"lat={lat_range}, lon={lon_range}"
+        )
+
+    # Contiguous slices (works for any sort order as long as the region is
+    # contiguous in index space, which it is for CONUS in any convention).
+    lat_slc = slice(lat_idx[0], lat_idx[-1] + 1)
+    lon_slc = slice(lon_idx[0], lon_idx[-1] + 1)
+
+    sub_arrays = {}
+    for name, arr in arrays.items():
+        if arr.ndim == 2:
+            sub_arrays[name] = arr[lat_slc, lon_slc]
+        elif arr.ndim == 3:
+            sub_arrays[name] = arr[:, lat_slc, lon_slc]
+        else:
+            raise ValueError(f"{name}: unsupported ndim {arr.ndim}")
+
+    return lat[lat_slc], lon[lon_slc], sub_arrays
+
+
+# ============================================================================
+# Grid-wise SRH/shear from pressure-level winds
 # ============================================================================
 
 def grid_derive_srh_and_shear(u_pl, v_pl, gh_pl, pressure_levels,

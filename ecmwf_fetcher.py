@@ -179,6 +179,30 @@ def fetch_ecmwf(target_valid_time: pd.Timestamp,
     v_arr = v_arr[order]
     gh_arr = gh_arr[order]
 
+    # --- SUBSET to CONUS region BEFORE the expensive SRH derivation ---
+    # The full ECMWF grid is global (~1M points); CONUS is ~4% of that.
+    # 25x speedup on the pure-Python loop in grid_derive_srh_and_shear.
+    CONUS_LAT = (20.0, 55.0)
+    CONUS_LON = (-130.0, -60.0)
+    lat, lon, subbed = scp_math.subset_to_region(
+        lat, lon, CONUS_LAT, CONUS_LON,
+        {
+            "u_pl":  u_arr,
+            "v_pl":  v_arr,
+            "gh_pl": gh_arr,
+            "cape":  cape_arr,
+            "u10":   u10_arr,
+            "v10":   v10_arr,
+        },
+    )
+    u_arr = subbed["u_pl"]
+    v_arr = subbed["v_pl"]
+    gh_arr = subbed["gh_pl"]
+    cape_arr = subbed["cape"]
+    u10_arr = subbed["u10"]
+    v10_arr = subbed["v10"]
+    print(f"[ECMWF] subset to CONUS: {u_arr.shape}")
+
     n_levels, n_lat, n_lon = u_arr.shape
 
     # Build augmented profile: prepend 10m winds at h = surface_elev + 10

@@ -173,6 +173,30 @@ def fetch_cmc(target_valid_time: pd.Timestamp) -> xr.Dataset:
 
     # ----- after tempdir cleanup, just numpy from here -----
 
+    # --- SUBSET to CONUS region BEFORE the expensive SRH derivation ---
+    # The full CMC grid is global (~2.9M points); CONUS is ~4% of that.
+    # ~25x speedup on grid_derive_srh_and_shear.
+    CONUS_LAT = (20.0, 55.0)
+    CONUS_LON = (-130.0, -60.0)
+    lat, lon, subbed = scp_math.subset_to_region(
+        lat, lon, CONUS_LAT, CONUS_LON,
+        {
+            "u_pl":  u_pl,
+            "v_pl":  v_pl,
+            "cape":  cape_arr,
+            "cin":   cin_arr,
+            "u10":   u10_arr,
+            "v10":   v10_arr,
+        },
+    )
+    u_pl = subbed["u_pl"]
+    v_pl = subbed["v_pl"]
+    cape_arr = subbed["cape"]
+    cin_arr  = subbed["cin"]
+    u10_arr  = subbed["u10"]
+    v10_arr  = subbed["v10"]
+    print(f"[CMC] subset to CONUS: {u_pl.shape}")
+
     n_lev, n_lat, n_lon = u_pl.shape
 
     # Build ISA height proxy on the grid
