@@ -3,20 +3,79 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SCP_Agreement &mdash; 2026-05-25 00:00:00</title>
+  <title>SCP_Agreement</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-            Roboto, Helvetica, Arial, sans-serif; margin: 24px;
-            background: #f9f9f9; color: #222; }
-    h1 { font-size: 1.2rem; font-weight: 600; }
-    .sub { color: #666; font-size: 0.95rem; margin-bottom: 16px; }
-    img { max-width: 100%; height: auto; border-radius: 4px;
-           box-shadow: 0 2px 6px rgba(0,0,0,0.1); background: white; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                   Roboto, Helvetica, Arial, sans-serif;
+      margin: 24px; background: #f9f9f9; color: #222;
+      max-width: 1100px; margin-left: auto; margin-right: auto;
+    }
+    h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+    .sub { color: #666; font-size: 0.9rem; margin-bottom: 18px; }
+    .controls {
+      background: white; border-radius: 6px; padding: 14px 18px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      margin-bottom: 14px;
+    }
+    .day-label {
+      display: flex; justify-content: space-between; align-items: baseline;
+      margin-bottom: 8px;
+    }
+    .day-label .big { font-size: 1.1rem; font-weight: 600; }
+    .day-label .small { color: #666; font-size: 0.9rem; }
+    input[type=range] {
+      width: 100%; margin: 4px 0 8px 0;
+    }
+    .ticks {
+      display: flex; justify-content: space-between;
+      color: #888; font-size: 0.75rem;
+    }
+    img {
+      width: 100%; height: auto; border-radius: 4px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1); background: white;
+      display: block;
+    }
+    .footer { color: #888; font-size: 0.8rem; margin-top: 16px; text-align: center; }
   </style>
 </head>
 <body>
   <h1>SCP_Agreement</h1>
-  <p class="sub">Valid 2026-05-25 00:00:00 &middot; v1 (GFS + ECMWF)</p>
-  <img src="map.png" alt="Multi-model SCP agreement map">
+  <p class="sub">Multi-model Supercell Composite Parameter agreement &mdash; 10-day forecast</p>
+
+  <div class="controls">
+    <div class="day-label">
+      <span class="big" id="dayLabel">Day 1</span>
+      <span class="small" id="dayMeta">valid 2026-05-26 00:00:00 &middot; GFS, ECMWF</span>
+    </div>
+    <input type="range" id="daySlider" min="1" max="10" value="1" step="1">
+    <div class="ticks">
+      <span>Day 1</span>
+      <span>Day 10</span>
+    </div>
+  </div>
+
+  <img id="dayImage" src="map_day01.png" alt="SCP Agreement map">
+
+  <p class="footer">v2: GFS + ECMWF + CMC GDPS. Opacity reflects model agreement.</p>
+
+  <script>
+    const days = [{"day": 1, "valid": "2026-05-26 00:00:00", "png": "map_day01.png", "models": ["GFS", "ECMWF"]}, {"day": 2, "valid": "2026-05-27 00:00:00", "png": "map_day02.png", "models": ["GFS", "ECMWF"]}, {"day": 3, "valid": "2026-05-28 00:00:00", "png": "map_day03.png", "models": ["GFS", "ECMWF"]}, {"day": 4, "valid": "2026-05-29 00:00:00", "png": "map_day04.png", "models": ["GFS", "ECMWF"]}, {"day": 5, "valid": "2026-05-30 00:00:00", "png": "map_day05.png", "models": ["GFS", "ECMWF"]}, {"day": 6, "valid": "2026-05-31 00:00:00", "png": "map_day06.png", "models": ["GFS", "ECMWF"]}, {"day": 7, "valid": "2026-06-01 00:00:00", "png": "map_day07.png", "models": ["GFS", "ECMWF"]}, {"day": 8, "valid": "2026-06-02 00:00:00", "png": "map_day08.png", "models": ["GFS", "ECMWF"]}, {"day": 9, "valid": "2026-06-03 00:00:00", "png": "map_day09.png", "models": ["GFS", "ECMWF"]}, {"day": 10, "valid": "2026-06-04 00:00:00", "png": "map_day10.png", "models": ["GFS"]}];
+    const slider = document.getElementById('daySlider');
+    const img = document.getElementById('dayImage');
+    const label = document.getElementById('dayLabel');
+    const meta = document.getElementById('dayMeta');
+
+    function update(idx) {
+      const d = days[idx];
+      label.textContent = 'Day ' + d.day;
+      meta.textContent = 'valid ' + d.valid + ' \u00b7 ' + d.models.join(', ');
+      img.src = d.png;
+    }
+
+    slider.addEventListener('input', e => {
+      update(parseInt(e.target.value) - 1);
+    });
+  </script>
 </body>
 </html>
