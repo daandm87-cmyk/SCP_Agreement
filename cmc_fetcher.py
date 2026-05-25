@@ -39,7 +39,7 @@ import scp_math
 
 
 CMC_AVAILABILITY_LAG_HOURS = 7
-CMC_BASE_URL = "https://dd.weather.gc.ca/model_gem_global/15km/grib2/lat_lon"
+CMC_BASE_URL = "https://dd.weather.gc.ca/today/model_gem_global/15km/grib2/lat_lon"
 
 # Pressure levels and approximate ISA heights (m) for SRH derivation
 PRESSURE_LEVELS = [1000, 925, 850, 700, 500]
