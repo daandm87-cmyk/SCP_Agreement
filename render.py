@@ -38,17 +38,31 @@ SCP_COLORS = [
 
 def alpha_from_agreement(agreement_count, n_models_total):
     """
-    Map agreement count -> alpha. With 2 models, agreement=2 → fully opaque.
-    With 3+ models, gradation kicks in.
+    Map per-grid model-agreement count to alpha.
+
+    Design:
+        < 2 models agree: alpha = 0 (invisible)
+        2 of N agree:     alpha = 0.25 (visible but faint)
+        N of N agree:     alpha = 1.0 (fully opaque)
+        Linear interpolation between.
+
+    Special cases:
+        n_models_total == 1: any agreement -> fully visible
+        n_models_total == 2: agreement of 2 -> fully visible (binary)
     """
-    a = np.zeros_like(agreement_count, dtype=float)
-    a = np.where(agreement_count >= 2, 0.25, a)
-    a = np.where(agreement_count >= 3, 0.50, a)
-    a = np.where(agreement_count >= 4, 0.75, a)
-    a = np.where(agreement_count >= 5, 1.00, a)
-    if n_models_total <= 2:
-        a = np.where(agreement_count >= n_models_total, 1.0, a)
-    return a
+    agreement_count = np.asarray(agreement_count)
+
+    if n_models_total < 2:
+        return np.where(agreement_count >= 1, 1.0, 0.0).astype(float)
+
+    if n_models_total == 2:
+        return np.where(agreement_count >= 2, 1.0, 0.0).astype(float)
+
+    # 3+ models: linear scale from 0.25 (at 2 agree) to 1.0 (at all agree)
+    frac = (agreement_count - 2) / (n_models_total - 2)
+    frac = np.clip(frac, 0.0, 1.0)
+    alpha_visible = 0.25 + 0.75 * frac
+    return np.where(agreement_count >= 2, alpha_visible, 0.0)
 
 
 def render_day_map(mscp, agreement_count, n_models_total, lats, lons,
@@ -83,13 +97,17 @@ def render_day_map(mscp, agreement_count, n_models_total, lats, lons,
         lon2d, lat2d = lons, lats
 
     mask = (alpha == 0) | (mscp < SCP_BOUNDS[0])
-    mscp_masked = np.ma.masked_array(mscp, mask=mask)
+    # Build a 2D alpha array: zero where invisible, otherwise the
+    # agreement-driven value. matplotlib >= 3.4 honors per-cell alpha
+    # in pcolormesh.
+    alpha_arr = np.where(mask, 0.0, alpha)
 
     ax.pcolormesh(
-        lon2d, lat2d, mscp_masked,
+        lon2d, lat2d, mscp,
         cmap=cmap, norm=norm,
         transform=ccrs.PlateCarree(),
         shading="auto", rasterized=True, zorder=3,
+        alpha=alpha_arr,
     )
 
     title = f"Multi-Model SCP Agreement  |  valid {valid_time_str}"
@@ -104,9 +122,9 @@ def render_day_map(mscp, agreement_count, n_models_total, lats, lons,
     cb.set_label("mSCP (mean SCP × CIN factor)")
 
     fig.text(0.5, 0.02,
-             f"Opacity = model agreement count.  "
-             f"0-1: invisible, 2: 25%, 3: 50%, 4: 75%, 5+: 100% "
-             f"(with 2 models: binary visible/invisible).",
+             f"Opacity = model agreement.  "
+             f"<2 agree: invisible. 2 of N: 25%. "
+             f"All N agree: 100% (linear in between).",
              ha="center", fontsize=9, color="#444")
 
     out_png = OUT_DIR / png_filename
