@@ -46,7 +46,7 @@
   <div class="controls">
     <div class="day-label">
       <span class="big" id="dayLabel">Day 1</span>
-      <span class="small" id="dayMeta">valid 2026-05-29 00:00:00 &middot; GFS, ECMWF</span>
+      <span class="small" id="dayMeta">valid 2026-05-30 00:00:00 &middot; GFS, ECMWF</span>
     </div>
     <input type="range" id="daySlider" min="1" max="10" value="1" step="1">
     <div class="ticks">
@@ -60,7 +60,7 @@
   <p class="footer">v2: GFS + ECMWF + CMC GDPS. Opacity reflects model agreement.</p>
 
   <script>
-    const days = [{"day": 1, "valid": "2026-05-29 00:00:00", "png": "map_day01.png", "models": ["GFS", "ECMWF"]}, {"day": 2, "valid": "2026-05-30 00:00:00", "png": "map_day02.png", "models": ["GFS", "ECMWF"]}, {"day": 3, "valid": "2026-05-31 00:00:00", "png": "map_day03.png", "models": ["GFS", "ECMWF"]}, {"day": 4, "valid": "2026-06-01 00:00:00", "png": "map_day04.png", "models": ["GFS", "ECMWF"]}, {"day": 5, "valid": "2026-06-02 00:00:00", "png": "map_day05.png", "models": ["GFS", "ECMWF"]}, {"day": 6, "valid": "2026-06-03 00:00:00", "png": "map_day06.png", "models": ["GFS", "ECMWF"]}, {"day": 7, "valid": "2026-06-04 00:00:00", "png": "map_day07.png", "models": ["GFS", "ECMWF"]}, {"day": 8, "valid": "2026-06-05 00:00:00", "png": "map_day08.png", "models": ["GFS", "ECMWF"]}, {"day": 9, "valid": "2026-06-06 00:00:00", "png": "map_day09.png", "models": ["GFS", "ECMWF"]}, {"day": 10, "valid": "2026-06-07 00:00:00", "png": "map_day10.png", "models": ["GFS", "ECMWF"]}];
+    const days = [{"day": 1, "valid": "2026-05-30 00:00:00", "png": "map_day01.png", "models": ["GFS", "ECMWF"]}, {"day": 2, "valid": "2026-05-31 00:00:00", "png": "map_day02.png", "models": ["GFS", "ECMWF"]}, {"day": 3, "valid": "2026-06-01 00:00:00", "png": "map_day03.png", "models": ["GFS", "ECMWF"]}, {"day": 4, "valid": "2026-06-02 00:00:00", "png": "map_day04.png", "models": ["GFS", "ECMWF"]}, {"day": 5, "valid": "2026-06-03 00:00:00", "png": "map_day05.png", "models": ["GFS", "ECMWF"]}, {"day": 6, "valid": "2026-06-04 00:00:00", "png": "map_day06.png", "models": ["GFS", "ECMWF"]}, {"day": 7, "valid": "2026-06-05 00:00:00", "png": "map_day07.png", "models": ["GFS", "ECMWF"]}, {"day": 8, "valid": "2026-06-06 00:00:00", "png": "map_day08.png", "models": ["GFS", "ECMWF"]}, {"day": 9, "valid": "2026-06-07 00:00:00", "png": "map_day09.png", "models": ["GFS", "ECMWF"]}, {"day": 10, "valid": "2026-06-08 00:00:00", "png": "map_day10.png", "models": ["GFS", "ECMWF"]}];
     const slider = document.getElementById('daySlider');
     const img = document.getElementById('dayImage');
     const label = document.getElementById('dayLabel');
