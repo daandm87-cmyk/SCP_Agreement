@@ -39,7 +39,14 @@ import scp_math
 
 
 CMC_AVAILABILITY_LAG_HOURS = 7
-CMC_BASE_URL = "https://dd.weather.gc.ca/today/model_gem_global/15km/grib2/lat_lon"
+# MSC publishes GDPS files at multiple URL paths. The form Herbie's GDPS
+# support uses (no /today/) is the canonical working path; the /today/
+# form is mentioned in MSC docs but has been intermittently unavailable.
+# We try the canonical form first, fall back to /today/ if needed.
+CMC_BASE_URLS = (
+    "https://dd.weather.gc.ca/model_gem_global/15km/grib2/lat_lon",
+    "https://dd.weather.gc.ca/today/model_gem_global/15km/grib2/lat_lon",
+)
 
 # Pressure levels and approximate ISA heights (m) for SRH derivation
 PRESSURE_LEVELS = [1000, 925, 850, 700, 500]
@@ -77,7 +84,7 @@ def candidate_cmc_runs(target_valid_time: pd.Timestamp):
                 yield candidate, fxx
 
 
-def _build_cmc_url(run_init: pd.Timestamp, fxx: int,
+def _build_cmc_url(base_url: str, run_init: pd.Timestamp, fxx: int,
                    variable: str, level: str) -> str:
     """Build the MSC GDPS file URL for one variable/level/forecast hour."""
     hh = f"{run_init.hour:02d}"
@@ -86,7 +93,7 @@ def _build_cmc_url(run_init: pd.Timestamp, fxx: int,
     filename = (
         f"CMC_glb_{variable}_{level}_latlon.15x.15_{date_str}_P{fxx_str}.grib2"
     )
-    return f"{CMC_BASE_URL}/{hh}/{fxx_str}/{filename}"
+    return f"{base_url}/{hh}/{fxx_str}/{filename}"
 
 
 def _download_cmc_file(url: str, local_path: Path):
@@ -116,11 +123,11 @@ def _open_grib(grib_path):
     return ds[data_vars[0]].squeeze(drop=True)
 
 
-def _fetch_cmc_field(run_init, fxx, variable, level, tmp_dir):
+def _fetch_cmc_field(base_url, run_init, fxx, variable, level, tmp_dir):
     """
     Download one CMC field directly from MSC. Returns a DataArray.
     """
-    url = _build_cmc_url(run_init, fxx, variable, level)
+    url = _build_cmc_url(base_url, run_init, fxx, variable, level)
     local_path = tmp_dir / url.split("/")[-1]
 
     if not local_path.exists():
@@ -154,21 +161,32 @@ def fetch_cmc(target_valid_time: pd.Timestamp) -> xr.Dataset:
     last_err = None
     chosen_run = None
     chosen_fxx = None
+    chosen_base = None
     with tempfile.TemporaryDirectory(prefix="cmc_probe_") as td_probe:
         probe_dir = Path(td_probe)
         for run_init, fxx in candidates:
-            probe_url = _build_cmc_url(run_init, fxx, "CAPE", "SFC_0")
-            print(f"[CMC] trying run={run_init} F{fxx:03d}: {probe_url}")
-            probe_path = probe_dir / probe_url.split("/")[-1]
-            try:
-                _download_cmc_file(probe_url, probe_path)
-                chosen_run, chosen_fxx = run_init, fxx
-                print(f"[CMC] found valid run={run_init} F{fxx:03d}")
+            for base_url in CMC_BASE_URLS:
+                probe_url = _build_cmc_url(base_url, run_init, fxx,
+                                           "CAPE", "SFC_0")
+                print(f"[CMC] trying: {probe_url}")
+                probe_path = probe_dir / probe_url.split("/")[-1]
+                # Wipe previous attempt so we always re-download (otherwise
+                # the second base_url attempt sees the empty file from the
+                # first failed attempt)
+                if probe_path.exists():
+                    probe_path.unlink()
+                try:
+                    _download_cmc_file(probe_url, probe_path)
+                    chosen_run, chosen_fxx, chosen_base = run_init, fxx, base_url
+                    print(f"[CMC] found valid: run={run_init} F{fxx:03d} "
+                          f"base={base_url}")
+                    break
+                except RuntimeError as e:
+                    last_err = e
+                    print(f"[CMC]   -> not available")
+                    continue
+            if chosen_run is not None:
                 break
-            except RuntimeError as e:
-                last_err = e
-                print(f"[CMC]   -> not available, trying older run")
-                continue
 
     if chosen_run is None:
         raise RuntimeError(
@@ -177,6 +195,7 @@ def fetch_cmc(target_valid_time: pd.Timestamp) -> xr.Dataset:
         )
 
     run_init, fxx = chosen_run, chosen_fxx
+    base_url = chosen_base
     print(f"[CMC] run={run_init} F{fxx:03d} -> valid {target}")
 
     # ----- step 2: download everything from the chosen run -----
@@ -184,20 +203,20 @@ def fetch_cmc(target_valid_time: pd.Timestamp) -> xr.Dataset:
         tmp_dir = Path(td)
 
         # Single-level fields
-        cape = _fetch_cmc_field(run_init, fxx, "CAPE", "SFC_0",  tmp_dir)
-        cin  = _fetch_cmc_field(run_init, fxx, "CIN",  "SFC_0",  tmp_dir)
-        u10  = _fetch_cmc_field(run_init, fxx, "UGRD", "TGL_10", tmp_dir)
-        v10  = _fetch_cmc_field(run_init, fxx, "VGRD", "TGL_10", tmp_dir)
+        cape = _fetch_cmc_field(base_url, run_init, fxx, "CAPE", "SFC_0",  tmp_dir)
+        cin  = _fetch_cmc_field(base_url, run_init, fxx, "CIN",  "SFC_0",  tmp_dir)
+        u10  = _fetch_cmc_field(base_url, run_init, fxx, "UGRD", "TGL_10", tmp_dir)
+        v10  = _fetch_cmc_field(base_url, run_init, fxx, "VGRD", "TGL_10", tmp_dir)
 
         # Pressure-level winds for SRH derivation
         u_pl_list = []
         v_pl_list = []
         for p in PRESSURE_LEVELS:
             u_pl_list.append(
-                _fetch_cmc_field(run_init, fxx, "UGRD", f"ISBL_{p}", tmp_dir)
+                _fetch_cmc_field(base_url, run_init, fxx, "UGRD", f"ISBL_{p}", tmp_dir)
             )
             v_pl_list.append(
-                _fetch_cmc_field(run_init, fxx, "VGRD", f"ISBL_{p}", tmp_dir)
+                _fetch_cmc_field(base_url, run_init, fxx, "VGRD", f"ISBL_{p}", tmp_dir)
             )
 
         # Materialize arrays while temp files still exist
