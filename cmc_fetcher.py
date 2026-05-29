@@ -46,17 +46,27 @@ PRESSURE_LEVELS = [1000, 925, 850, 700, 500]
 ISA_HEIGHTS_M    = [110,   780,  1500, 3000, 5570]
 
 
-def find_latest_cmc_run(target_valid_time: pd.Timestamp):
-    """Most recent CMC GDPS cycle that can forecast the target valid time."""
+def candidate_cmc_runs(target_valid_time: pd.Timestamp):
+    """
+    Yield (run_init, fxx) tuples in newest-first order.
+
+    Yields more than one candidate so fetch_cmc can fall back to an older
+    run if the newest one's files aren't on MSC's /today/ feed yet (or have
+    rotated out, etc).
+    """
     now = pd.Timestamp.now('UTC').tz_localize(None)
     target = (target_valid_time.tz_localize(None)
               if target_valid_time.tzinfo else target_valid_time)
 
+    seen = set()
     for hours_back in range(0, 72, 12):
         candidate_day = (now - pd.Timedelta(hours=hours_back)).floor("12h")
         for run_hour in (12, 0):
             candidate = candidate_day.replace(hour=run_hour, minute=0,
                                               second=0, microsecond=0)
+            if candidate in seen:
+                continue
+            seen.add(candidate)
             if candidate > now:
                 continue
             age_hours = (now - candidate).total_seconds() / 3600.0
@@ -64,11 +74,7 @@ def find_latest_cmc_run(target_valid_time: pd.Timestamp):
                 continue
             fxx = int((target - candidate).total_seconds() / 3600.0)
             if 0 <= fxx <= 240:
-                return candidate, fxx
-
-    raise RuntimeError(
-        f"No usable CMC GDPS run found for target valid time {target_valid_time}"
-    )
+                yield candidate, fxx
 
 
 def _build_cmc_url(run_init: pd.Timestamp, fxx: int,
@@ -132,12 +138,48 @@ def _fetch_cmc_field(run_init, fxx, variable, level, tmp_dir):
 def fetch_cmc(target_valid_time: pd.Timestamp) -> xr.Dataset:
     """
     Fetch CMC GDPS fields and assemble into the SCP_Agreement Dataset schema.
+
+    Tries multiple candidate runs (newest first) and falls back to older ones
+    if the newest run's files aren't available on MSC's /today/ feed.
     """
     target = pd.Timestamp(target_valid_time)
-    run_init, fxx = find_latest_cmc_run(target)
+
+    # ----- step 1: find a run whose CAPE file actually exists -----
+    candidates = list(candidate_cmc_runs(target))
+    if not candidates:
+        raise RuntimeError(
+            f"No usable CMC GDPS run found for target valid time {target}"
+        )
+
+    last_err = None
+    chosen_run = None
+    chosen_fxx = None
+    with tempfile.TemporaryDirectory(prefix="cmc_probe_") as td_probe:
+        probe_dir = Path(td_probe)
+        for run_init, fxx in candidates:
+            probe_url = _build_cmc_url(run_init, fxx, "CAPE", "SFC_0")
+            print(f"[CMC] trying run={run_init} F{fxx:03d}: {probe_url}")
+            probe_path = probe_dir / probe_url.split("/")[-1]
+            try:
+                _download_cmc_file(probe_url, probe_path)
+                chosen_run, chosen_fxx = run_init, fxx
+                print(f"[CMC] found valid run={run_init} F{fxx:03d}")
+                break
+            except RuntimeError as e:
+                last_err = e
+                print(f"[CMC]   -> not available, trying older run")
+                continue
+
+    if chosen_run is None:
+        raise RuntimeError(
+            f"CMC: no candidate run had CAPE@SFC_0 available for {target}. "
+            f"Last error: {last_err}"
+        )
+
+    run_init, fxx = chosen_run, chosen_fxx
     print(f"[CMC] run={run_init} F{fxx:03d} -> valid {target}")
 
-    # Use a single temp dir for this fetch
+    # ----- step 2: download everything from the chosen run -----
     with tempfile.TemporaryDirectory(prefix="cmc_") as td:
         tmp_dir = Path(td)
 
