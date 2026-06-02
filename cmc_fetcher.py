@@ -39,13 +39,15 @@ import scp_math
 
 
 CMC_AVAILABILITY_LAG_HOURS = 7
-# MSC publishes GDPS files at multiple URL paths. The form Herbie's GDPS
-# support uses (no /today/) is the canonical working path; the /today/
-# form is mentioned in MSC docs but has been intermittently unavailable.
-# We try the canonical form first, fall back to /today/ if needed.
+# MSC documents the GDPS path as /today/model_gem_global/15km/grib2/lat_lon/
+# under either dd.weather.gc.ca or dd.meteo.gc.ca. In practice as of mid-2026,
+# dd.weather.gc.ca was returning 404s for current files while the numbered
+# mirror dd2.weather.gc.ca was serving today's data. We try the verified-live
+# mirror first, then the two documented hostnames in case routing changes.
 CMC_BASE_URLS = (
-    "https://dd.weather.gc.ca/model_gem_global/15km/grib2/lat_lon",
+    "https://dd2.weather.gc.ca/today/model_gem_global/15km/grib2/lat_lon",
     "https://dd.weather.gc.ca/today/model_gem_global/15km/grib2/lat_lon",
+    "https://dd.meteo.gc.ca/today/model_gem_global/15km/grib2/lat_lon",
 )
 
 # Pressure levels and approximate ISA heights (m) for SRH derivation
