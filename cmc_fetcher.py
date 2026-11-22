@@ -1,240 +1,246 @@
 """
 CMC GDPS data fetcher.
 
-Bypasses Herbie and downloads directly from MSC's open data portal. URL
-pattern is documented and stable:
+Bypasses Herbie and downloads directly from the MSC Datamart.
 
-    https://dd.weather.gc.ca/model_gem_global/15km/grib2/lat_lon/
-        {HH}/{hhh}/CMC_glb_{VAR}_{LVL}_latlon.15x.15_{YYYYMMDDHH}_P{hhh}.grib2
+URL layout (verified against live directory listings on 2026-11-22, after the
+MSC 2026-04-14 infrastructure migration and the GDPS 10.0.0 upgrade; the old
+model_gem_global/.../CMC_glb_* layout returns 404 everywhere):
 
-Where:
-    HH         = run hour (00 or 12), 2 digits
-    hhh        = forecast hour, 3 digits
-    VAR        = CAPE, CIN, UGRD, VGRD, ...
-    LVL        = level encoding (SFC_0, TGL_10, ISBL_500, ...)
-    YYYYMMDDHH = run init date+hour
+    https://{host}/{YYYYMMDD}/WXO-DD/model_gdps/15km/{HH}/{hhh}/
+        {YYYYMMDD}T{HH}Z_MSC_GDPS_{VAR}_{LEVEL}_LatLon0.15_PT{hhh}H.grib2
 
-Fields pulled (14 files per valid time):
-    CAPE   at SFC_0     (surface CAPE)
-    CIN    at SFC_0     (surface CIN)
-    UGRD,VGRD at TGL_10
-    UGRD,VGRD at ISBL_1000, 925, 850, 700, 500   (10 files for SRH derivation)
+    host      = dd.weather.gc.ca | dd.meteo.gc.ca | dd2.weather.gc.ca
+                (all three served identical listings on 2026-11-22)
+    YYYYMMDD  = run init date. The dated tree keeps ~30 days and also holds
+                today's runs. (/today/model_gdps/15km/... exists too but only
+                carries the current UTC day, so it can't reach yesterday's 12Z.)
+    HH        = run hour, 00 or 12
+    hhh       = forecast hour, 3 digits, hourly 000-240
 
-SRH derived from pressure-level winds (same approach as ECMWF) since
-CMC GDPS does not output HLCY natively. Standard atmosphere heights
+Fields pulled (14 files per valid time), exact {VAR}_{LEVEL} tokens:
+
+    CAPE_Sfc                          surface-based CAPE
+    CIN_Sfc                           surface-based CIN
+    WindU_AGL-10m,   WindV_AGL-10m    10 m winds
+    WindU_IsbL-1000, WindV_IsbL-1000  isobaric winds; level is zero-padded
+    WindU_IsbL-0925, WindV_IsbL-0925  to 4 digits (IsbL-0500, not IsbL-500)
+    WindU_IsbL-0850, WindV_IsbL-0850
+    WindU_IsbL-0700, WindV_IsbL-0700
+    WindU_IsbL-0500, WindV_IsbL-0500
+
+    e.g. https://dd.weather.gc.ca/20261122/WXO-DD/model_gdps/15km/00/024/
+             20261122T00Z_MSC_GDPS_CAPE_Sfc_LatLon0.15_PT024H.grib2
+
+Each file holds one GRIB2 message on a global 0.15 deg grid (2400 x 1201,
+lat -90..90 ascending, lon 0..359.85). Fields are validated after opening by
+their WMO GRIB2 codes (discipline/category/number) and level, not by cfgrib's
+name, because cfgrib/ecCodes decodes CAPE and CIN as 'unknown': MSC encodes
+them as 0/7/6 and 0/7/7 (standard WMO CAPE/CIN, J/kg) with the surface level
+value left missing, which ecCodes' cape/cin concepts don't match. Observed on
+2026-11-22 00Z F024: CAPE 0..5995 J/kg, CIN -1113..0 J/kg (already negative,
+matching scp_math.cin_factor's convention). Winds decode normally as
+u10/v10 (heightAboveGround 10) and u/v (isobaricInhPa).
+
+SRH is derived from pressure-level winds (same approach as ECMWF) because
+GDPS does not publish storm-relative helicity. Standard-atmosphere heights
 are used for the geopotential proxy.
 """
 
 import tempfile
-import urllib.request
 import urllib.error
+import urllib.request
 from pathlib import Path
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import xarray as xr
 import cfgrib
 
 import scp_math
 
 
-CMC_AVAILABILITY_LAG_HOURS = 7
-# MSC documents the GDPS path as /today/model_gem_global/15km/grib2/lat_lon/
-# under either dd.weather.gc.ca or dd.meteo.gc.ca. In practice as of mid-2026,
-# dd.weather.gc.ca was returning 404s for current files while the numbered
-# mirror dd2.weather.gc.ca was serving today's data. We try the verified-live
-# mirror first, then the two documented hostnames in case routing changes.
-CMC_BASE_URLS = (
-    "https://dd2.weather.gc.ca/today/model_gem_global/15km/grib2/lat_lon",
-    "https://dd.weather.gc.ca/today/model_gem_global/15km/grib2/lat_lon",
-    "https://dd.meteo.gc.ca/today/model_gem_global/15km/grib2/lat_lon",
+CMC_AVAILABILITY_LAG_HOURS = 5   # the HEAD probe confirms availability anyway
+CMC_HOSTS = (
+    "https://dd.weather.gc.ca",
+    "https://dd.meteo.gc.ca",
+    "https://dd2.weather.gc.ca",
 )
+HTTP_TIMEOUT_S = 120
+USER_AGENT = "SCP_Agreement/2 (python-urllib)"
 
 # Pressure levels and approximate ISA heights (m) for SRH derivation
 PRESSURE_LEVELS = [1000, 925, 850, 700, 500]
 ISA_HEIGHTS_M    = [110,   780,  1500, 3000, 5570]
 
+# key -> (VAR, LEVEL token, (discipline, category, number), (level coord, value))
+FIELDS = {
+    "cape": ("CAPE",  "Sfc",     (0, 7, 6), ("surface", None)),
+    "cin":  ("CIN",   "Sfc",     (0, 7, 7), ("surface", None)),
+    "u10":  ("WindU", "AGL-10m", (0, 2, 2), ("heightAboveGround", 10)),
+    "v10":  ("WindV", "AGL-10m", (0, 2, 3), ("heightAboveGround", 10)),
+}
+for _p in PRESSURE_LEVELS:
+    FIELDS[f"u{_p}"] = ("WindU", f"IsbL-{_p:04d}", (0, 2, 2), ("isobaricInhPa", _p))
+    FIELDS[f"v{_p}"] = ("WindV", f"IsbL-{_p:04d}", (0, 2, 3), ("isobaricInhPa", _p))
+
+_CODE_KEYS = ("discipline", "parameterCategory", "parameterNumber")
+
+_inventory_printed = False
+
 
 def candidate_cmc_runs(target_valid_time: pd.Timestamp):
-    """
-    Yield (run_init, fxx) tuples in newest-first order.
-
-    Yields more than one candidate so fetch_cmc can fall back to an older
-    run if the newest one's files aren't on MSC's /today/ feed yet (or have
-    rotated out, etc).
-    """
+    """Yield (run_init, fxx) tuples newest-first, walking back up to 72 h."""
     now = pd.Timestamp.now('UTC').tz_localize(None)
     target = (target_valid_time.tz_localize(None)
               if target_valid_time.tzinfo else target_valid_time)
 
-    seen = set()
-    for hours_back in range(0, 72, 12):
-        candidate_day = (now - pd.Timedelta(hours=hours_back)).floor("12h")
-        for run_hour in (12, 0):
-            candidate = candidate_day.replace(hour=run_hour, minute=0,
-                                              second=0, microsecond=0)
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            if candidate > now:
-                continue
-            age_hours = (now - candidate).total_seconds() / 3600.0
-            if age_hours < CMC_AVAILABILITY_LAG_HOURS:
-                continue
-            fxx = int((target - candidate).total_seconds() / 3600.0)
-            if 0 <= fxx <= 240:
-                yield candidate, fxx
+    newest = now.floor("12h")
+    for k in range(0, 7):                       # 7 cycles = 72 h back
+        run_init = newest - pd.Timedelta(hours=12 * k)
+        age_hours = (now - run_init).total_seconds() / 3600.0
+        if age_hours < CMC_AVAILABILITY_LAG_HOURS:
+            continue
+        fxx = int((target - run_init).total_seconds() / 3600.0)
+        if 0 <= fxx <= 240:
+            yield run_init, fxx
 
 
-def _build_cmc_url(base_url: str, run_init: pd.Timestamp, fxx: int,
-                   variable: str, level: str) -> str:
-    """Build the MSC GDPS file URL for one variable/level/forecast hour."""
+def _build_cmc_url(host: str, run_init: pd.Timestamp, fxx: int,
+                   var: str, level: str) -> str:
+    """Build the MSC Datamart GDPS URL for one variable/level/forecast hour."""
+    ymd = run_init.strftime("%Y%m%d")
     hh = f"{run_init.hour:02d}"
-    fxx_str = f"{fxx:03d}"
-    date_str = run_init.strftime("%Y%m%d%H")
-    filename = (
-        f"CMC_glb_{variable}_{level}_latlon.15x.15_{date_str}_P{fxx_str}.grib2"
-    )
-    return f"{base_url}/{hh}/{fxx_str}/{filename}"
+    hhh = f"{fxx:03d}"
+    filename = (f"{ymd}T{hh}Z_MSC_GDPS_{var}_{level}"
+                f"_LatLon0.15_PT{hhh}H.grib2")
+    return f"{host}/{ymd}/WXO-DD/model_gdps/15km/{hh}/{hhh}/{filename}"
 
 
-def _download_cmc_file(url: str, local_path: Path):
-    """Download via urllib. Raises on HTTP/URL errors."""
+def _request(url: str, method: str = "GET"):
+    req = urllib.request.Request(url, method=method,
+                                 headers={"User-Agent": USER_AGENT})
     try:
-        urllib.request.urlretrieve(url, str(local_path))
+        return urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S)
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code} for {url}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"URL error for {url}: {e.reason}")
+        raise RuntimeError(f"HTTP {e.code}") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        reason = getattr(e, "reason", e)
+        raise RuntimeError(f"network error: {reason}") from None
 
 
-def _open_grib(grib_path):
-    """Open a single-variable GRIB file and return its DataArray."""
+def _exists(url: str) -> bool:
+    try:
+        with _request(url, method="HEAD"):
+            return True
+    except RuntimeError:
+        return False
+
+
+def _download(url: str, local_path: Path):
+    with _request(url) as resp, open(local_path, "wb") as fh:
+        while True:
+            chunk = resp.read(1 << 20)
+            if not chunk:
+                break
+            fh.write(chunk)
+
+
+def _open_field(grib_path: Path, key: str) -> xr.DataArray:
+    """Open a single-message GDPS GRIB and check its WMO code and level."""
     datasets = cfgrib.open_datasets(
         str(grib_path),
-        backend_kwargs={"indexpath": ""},
+        backend_kwargs={"indexpath": "", "read_keys": list(_CODE_KEYS)},
     )
     if not isinstance(datasets, list):
         datasets = [datasets]
-    if not datasets:
-        return None
-    ds = datasets[0]
-    data_vars = list(ds.data_vars)
-    if not data_vars:
-        return None
-    return ds[data_vars[0]].squeeze(drop=True)
+    found = [(ds, vn) for ds in datasets for vn in ds.data_vars]
+    if len(found) != 1:
+        raise RuntimeError(f"CMC {key}: expected 1 GRIB variable, got "
+                           f"{[vn for _, vn in found]}")
+    ds, vn = found[0]
+    da = ds[vn]
+    _, _, want_code, (want_tol, want_lev) = FIELDS[key]
+    code = tuple(da.attrs.get(f"GRIB_{k}") for k in _CODE_KEYS)
+    tol = da.attrs.get("GRIB_typeOfLevel")
+    lev = ds.coords[tol].item() if tol in ds.coords else None
+    if (code != want_code or tol != want_tol
+            or (want_lev is not None and lev != want_lev)):
+        raise RuntimeError(
+            f"CMC {key}: GRIB is {code} {tol}={lev}, expected {want_code} "
+            f"{want_tol}={want_lev} (MSC may have changed the encoding)")
+    da = da.squeeze(drop=True)
+    da.attrs["_level"] = f"{tol}={lev}" if want_lev is not None else tol
+    return da
 
 
-def _fetch_cmc_field(base_url, run_init, fxx, variable, level, tmp_dir):
-    """
-    Download one CMC field directly from MSC. Returns a DataArray.
-    """
-    url = _build_cmc_url(base_url, run_init, fxx, variable, level)
-    local_path = tmp_dir / url.split("/")[-1]
+def _print_inventory(arrays: dict):
+    print("[CMC] GRIB inventory (key: cfgrib name | WMO d/c/n | level | "
+          "units | min..max):")
+    for key, da in arrays.items():
+        a = da.attrs
+        code = "/".join(str(a.get(f"GRIB_{k}")) for k in _CODE_KEYS)
+        units = a.get("GRIB_units", "?")
+        if units == "unknown" and key in ("cape", "cin"):
+            units = "J kg**-1 (WMO 0/7)"
+        vals = da.values
+        print(f"[CMC]   {key:5s}: {da.name:7s} | {code} | {a['_level']:22s} | "
+              f"{units} | {np.nanmin(vals):.1f}..{np.nanmax(vals):.1f}")
 
-    if not local_path.exists():
-        try:
-            _download_cmc_file(url, local_path)
-        except RuntimeError as e:
-            raise RuntimeError(f"CMC {variable}@{level}: {e}")
 
-    arr = _open_grib(local_path)
-    if arr is None:
-        raise RuntimeError(f"CMC {variable}@{level}: GRIB had no usable data")
-    return arr
+def _find_run(target: pd.Timestamp):
+    """HEAD-probe CAPE for each candidate run/host; return the first hit."""
+    candidates = list(candidate_cmc_runs(target))
+    if not candidates:
+        raise RuntimeError(f"no GDPS run within F000-F240 of {target}")
+    for run_init, fxx in candidates:
+        for host in CMC_HOSTS:
+            var, lvl = FIELDS["cape"][:2]
+            if _exists(_build_cmc_url(host, run_init, fxx, var, lvl)):
+                return run_init, fxx, host
+    tried = ", ".join(f"{r:%d/%HZ}" for r, _ in candidates)
+    raise RuntimeError(f"no GDPS run had CAPE for {target} "
+                       f"(tried runs {tried} on {len(CMC_HOSTS)} hosts)")
 
 
 def fetch_cmc(target_valid_time: pd.Timestamp) -> xr.Dataset:
     """
-    Fetch CMC GDPS fields and assemble into the SCP_Agreement Dataset schema.
-
-    Tries multiple candidate runs (newest first) and falls back to older ones
-    if the newest run's files aren't available on MSC's /today/ feed.
+    Fetch CMC GDPS fields and assemble into the SCP_Agreement Dataset schema
+    (mlcape, mlcin, srh_03, shear_06 on latitude/longitude).
     """
+    global _inventory_printed
     target = pd.Timestamp(target_valid_time)
 
-    # ----- step 1: find a run whose CAPE file actually exists -----
-    candidates = list(candidate_cmc_runs(target))
-    if not candidates:
-        raise RuntimeError(
-            f"No usable CMC GDPS run found for target valid time {target}"
-        )
+    run_init, fxx, host = _find_run(target)
+    print(f"[CMC] run={run_init} F{fxx:03d} -> valid {target} ({host})")
 
-    last_err = None
-    chosen_run = None
-    chosen_fxx = None
-    chosen_base = None
-    with tempfile.TemporaryDirectory(prefix="cmc_probe_") as td_probe:
-        probe_dir = Path(td_probe)
-        for run_init, fxx in candidates:
-            for base_url in CMC_BASE_URLS:
-                probe_url = _build_cmc_url(base_url, run_init, fxx,
-                                           "CAPE", "SFC_0")
-                print(f"[CMC] trying: {probe_url}")
-                probe_path = probe_dir / probe_url.split("/")[-1]
-                # Wipe previous attempt so we always re-download (otherwise
-                # the second base_url attempt sees the empty file from the
-                # first failed attempt)
-                if probe_path.exists():
-                    probe_path.unlink()
-                try:
-                    _download_cmc_file(probe_url, probe_path)
-                    chosen_run, chosen_fxx, chosen_base = run_init, fxx, base_url
-                    print(f"[CMC] found valid: run={run_init} F{fxx:03d} "
-                          f"base={base_url}")
-                    break
-                except RuntimeError as e:
-                    last_err = e
-                    print(f"[CMC]   -> not available")
-                    continue
-            if chosen_run is not None:
-                break
-
-    if chosen_run is None:
-        raise RuntimeError(
-            f"CMC: no candidate run had CAPE@SFC_0 available for {target}. "
-            f"Last error: {last_err}"
-        )
-
-    run_init, fxx = chosen_run, chosen_fxx
-    base_url = chosen_base
-    print(f"[CMC] run={run_init} F{fxx:03d} -> valid {target}")
-
-    # ----- step 2: download everything from the chosen run -----
     with tempfile.TemporaryDirectory(prefix="cmc_") as td:
         tmp_dir = Path(td)
+        arrays = {}
+        for key, (var, lvl, _, _) in FIELDS.items():
+            url = _build_cmc_url(host, run_init, fxx, var, lvl)
+            local = tmp_dir / url.rsplit("/", 1)[-1]
+            try:
+                _download(url, local)
+            except RuntimeError as e:
+                raise RuntimeError(f"CMC {var}_{lvl}: {e} ({url})") from None
+            arrays[key] = _open_field(local, key)
 
-        # Single-level fields
-        cape = _fetch_cmc_field(base_url, run_init, fxx, "CAPE", "SFC_0",  tmp_dir)
-        cin  = _fetch_cmc_field(base_url, run_init, fxx, "CIN",  "SFC_0",  tmp_dir)
-        u10  = _fetch_cmc_field(base_url, run_init, fxx, "UGRD", "TGL_10", tmp_dir)
-        v10  = _fetch_cmc_field(base_url, run_init, fxx, "VGRD", "TGL_10", tmp_dir)
-
-        # Pressure-level winds for SRH derivation
-        u_pl_list = []
-        v_pl_list = []
-        for p in PRESSURE_LEVELS:
-            u_pl_list.append(
-                _fetch_cmc_field(base_url, run_init, fxx, "UGRD", f"ISBL_{p}", tmp_dir)
-            )
-            v_pl_list.append(
-                _fetch_cmc_field(base_url, run_init, fxx, "VGRD", f"ISBL_{p}", tmp_dir)
-            )
+        if not _inventory_printed:
+            _print_inventory(arrays)
+            _inventory_printed = True
 
         # Materialize arrays while temp files still exist
+        cape = arrays["cape"]
+        lat = cape["latitude"].values
+        lon = cape["longitude"].values
         cape_arr = cape.values
-        cin_arr  = cin.values
-        u10_arr  = u10.values
-        v10_arr  = v10.values
-        u_pl = np.stack([u.values for u in u_pl_list], axis=0)
-        v_pl = np.stack([v.values for v in v_pl_list], axis=0)
-
-        lat = (cape["latitude"].values if "latitude" in cape.coords
-               else cape["lat"].values)
-        lon = (cape["longitude"].values if "longitude" in cape.coords
-               else cape["lon"].values)
-
-    # ----- after tempdir cleanup, just numpy from here -----
+        cin_arr  = arrays["cin"].values
+        u10_arr  = arrays["u10"].values
+        v10_arr  = arrays["v10"].values
+        u_pl = np.stack([arrays[f"u{p}"].values for p in PRESSURE_LEVELS])
+        v_pl = np.stack([arrays[f"v{p}"].values for p in PRESSURE_LEVELS])
+        del arrays, cape
 
     # --- SUBSET to CONUS region BEFORE the expensive SRH derivation ---
     # The full CMC grid is global (~2.9M points); CONUS is ~4% of that.
@@ -259,6 +265,15 @@ def fetch_cmc(target_valid_time: pd.Timestamp) -> xr.Dataset:
     u10_arr  = subbed["u10"]
     v10_arr  = subbed["v10"]
     print(f"[CMC] subset to CONUS: {u_pl.shape}")
+
+    # MSC leaves CAPE and CIN missing (GRIB bitmap) wherever no parcel is
+    # buoyant; the product never contains an explicit 0 (checked 2026-11-22:
+    # 52% of CONUS missing, 0% zero, CAPE/CIN masks identical). Missing CAPE
+    # therefore means CAPE = 0. Without this, CMC drops out of the mean and
+    # agreement count wherever it's stable, and regridding smears the NaNs.
+    # CIN stays NaN there: main.py averages CIN with skipna, so other models'
+    # CIN is used where CMC has no parcel.
+    cape_arr = np.nan_to_num(cape_arr, nan=0.0)
 
     n_lev, n_lat, n_lon = u_pl.shape
 
@@ -300,7 +315,8 @@ def fetch_cmc(target_valid_time: pd.Timestamp) -> xr.Dataset:
         "forecast_hour": int(fxx),
         "valid_time": str(target),
         "notes": "CAPE=surface, CIN=surface, SRH derived from pressure-level "
-                 "winds using ISA heights. Downloaded directly from MSC.",
+                 "winds using ISA heights. Downloaded directly from MSC "
+                 "Datamart (model_gdps/15km).",
     })
 
     print(f"[CMC] Successfully assembled dataset")
