@@ -13,6 +13,9 @@ dependencies:
   - xarray
   - scipy
   - pandas
+  - h5py
+  - fsspec
+  - aiohttp
   - pip
   - pip:
     - ecmwf-opendata

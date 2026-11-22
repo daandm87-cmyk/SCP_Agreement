@@ -5,14 +5,15 @@ Multi-model Supercell Composite Parameter agreement map.
 For a target valid time, this product:
 
 1. Pulls severe weather environment fields from **GFS** (native),
-   **ECMWF Open Data** and **CMC GDPS** (MSC Datamart). ECMWF and CMC don't
-   output SRH or 0-6 km bulk shear, so those are derived from raw
-   pressure-level winds.
+   **ECMWF Open Data**, **CMC GDPS** (MSC Datamart), **DWD ICON** global
+   (DWD Open Data) and **UKMO Global 10 km** (Met Office on AWS). Only GFS
+   outputs SRH, so for the others SRH and 0-6 km bulk shear are derived from
+   raw pressure-level winds.
 2. Computes a **fixed-layer SCP** per model:
    `SCP = (CAPE/1000) * (SRH_03/50) * (Shear_06/20)`
 3. Takes the multi-model mean SCP and applies a **CIN factor correction**
-   (sigmoid penalty for cap) using the mean of GFS and CMC CIN (ECMWF Open
-   Data has no CIN).
+   (sigmoid penalty for cap) using the mean CIN of GFS, CMC and UKMO
+   (ECMWF and ICON Open Data have no CIN).
 4. Computes a **model-agreement count** at each grid point.
 5. Renders a CONUS map: color shading for mSCP magnitude, **opacity driven
    by model agreement** (more models agreeing -> more opaque).
@@ -21,18 +22,21 @@ Output is pushed to `docs/index.html` for GitHub Pages.
 
 ## v1 scope and known limitations
 
-- **Models:** GFS, ECMWF and CMC GDPS deterministic. Any model can fail
-  for a day without stopping the run.
+- **Models:** GFS, ECMWF, CMC GDPS, ICON and UKMO deterministic. Any model
+  can fail for a day without stopping the run. ICON (F180) and UKMO (F168)
+  don't reach Day 8-10, so those days use 3 models.
+- **CAPE flavour differs by model:** GFS, ICON and UKMO mixed-layer; ECMWF
+  most-unstable (runs highest); CMC surface-based.
 - **Single valid-time snapshot.** No accumulation across forecast window.
 - **CIN correction only.** LFC factor is designed in `scp_math.py` but
   not used in v1 since LFC isn't in standard GFS GRIB output. Defer to v2.
-- **ECMWF/CMC SRH/shear approximations:** derived from coarse pressure-level
+- **Derived SRH/shear approximations (all but GFS):** from coarse pressure-level
   winds (1000, 925, 850, 700, 500 mb) plus 10 m wind. Surface height is
   approximated as 100 m AGL (CONUS-Plains average); terrain effects in the
   Rockies / Appalachians will be inaccurate. CMC also uses standard-atmosphere
-  heights for the pressure levels (ECMWF uses real geopotential height).
-- **Agreement layer is coarse with 3 models** (2 of 3 or 3 of 3). The
-  transparency framework is general; more models give finer gradation.
+  heights for the pressure levels (the others use real geopotential height).
+- **ICON is interpolated** from its icosahedral grid to 0.25 deg before SRH
+  derivation; UKMO is read as a CONUS slab via HTTP range requests.
 
 ## File structure
 
@@ -49,6 +53,8 @@ SCP_Agreement/
 ├── gfs_fetcher.py              # Herbie-based GFS data pull
 ├── ecmwf_fetcher.py            # ECMWF Open Data pull + SRH/shear derivation
 ├── cmc_fetcher.py              # CMC GDPS pull from MSC Datamart + SRH/shear derivation
+├── icon_fetcher.py             # DWD ICON global pull + regrid + SRH/shear derivation
+├── ukmo_fetcher.py             # Met Office Global (AWS) CONUS-slab read + SRH/shear derivation
 ├── render.py                   # matplotlib/cartopy map + HTML wrapper
 ├── environment.yml             # conda env spec
 └── README.md

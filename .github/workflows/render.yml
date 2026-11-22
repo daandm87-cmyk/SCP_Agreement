@@ -18,7 +18,8 @@ permissions:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 5 models x 10 days took ~23 min locally (2026-11-22), plus conda setup
+    timeout-minutes: 75
 
     steps:
       - name: Checkout repo
