@@ -30,6 +30,8 @@ import scp_math
 import gfs_fetcher
 import ecmwf_fetcher
 import cmc_fetcher
+import icon_fetcher
+import ukmo_fetcher
 import render
 
 
@@ -106,11 +108,14 @@ def process_day(day_num: int, target_valid_time: pd.Timestamp) -> Optional[dict]
     """
     print(f"\n=== Day {day_num} | valid {target_valid_time} ===")
 
-    # Fetch all three (independently - any may fail)
+    # Fetch all models (independently - any may fail). ICON (F180) and
+    # UKMO (F168) don't reach Day 8-10, so later days have fewer models.
     fetches = {
         "GFS":   try_fetch(gfs_fetcher.fetch_gfs,     target_valid_time, "GFS"),
         "ECMWF": try_fetch(ecmwf_fetcher.fetch_ecmwf, target_valid_time, "ECMWF"),
         "CMC":   try_fetch(cmc_fetcher.fetch_cmc,     target_valid_time, "CMC"),
+        "ICON":  try_fetch(icon_fetcher.fetch_icon,   target_valid_time, "ICON"),
+        "UKMO":  try_fetch(ukmo_fetcher.fetch_ukmo,   target_valid_time, "UKMO"),
     }
 
     succeeded = {k: v for k, v in fetches.items() if v is not None}
@@ -155,7 +160,9 @@ def process_day(day_num: int, target_valid_time: pd.Timestamp) -> Optional[dict]
     title_extra = "Models: " + ", ".join(succeeded.keys())
     runs_parts = []
     for name, ds in succeeded.items():
-        runs_parts.append(f"{name} {ds.attrs.get('run_init', '?')}")
+        run = ds.attrs.get("run_init")
+        run_str = f"{pd.Timestamp(run):%d/%HZ}" if run else "?"
+        runs_parts.append(f"{name} {run_str}")
     title_extra += "  |  " + "  |  ".join(runs_parts)
 
     png_filename = f"map_day{day_num:02d}.png"
