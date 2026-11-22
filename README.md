@@ -4,13 +4,15 @@ Multi-model Supercell Composite Parameter agreement map.
 
 For a target valid time, this product:
 
-1. Pulls severe weather environment fields from **GFS** (native) and
-   **ECMWF Open Data** (with SRH and 0-6 km bulk shear derived from raw
-   pressure-level winds, since ECMWF doesn't output them).
+1. Pulls severe weather environment fields from **GFS** (native),
+   **ECMWF Open Data** and **CMC GDPS** (MSC Datamart). ECMWF and CMC don't
+   output SRH or 0-6 km bulk shear, so those are derived from raw
+   pressure-level winds.
 2. Computes a **fixed-layer SCP** per model:
    `SCP = (CAPE/1000) * (SRH_03/50) * (Shear_06/20)`
 3. Takes the multi-model mean SCP and applies a **CIN factor correction**
-   (sigmoid penalty for cap) using GFS CIN.
+   (sigmoid penalty for cap) using the mean of GFS and CMC CIN (ECMWF Open
+   Data has no CIN).
 4. Computes a **model-agreement count** at each grid point.
 5. Renders a CONUS map: color shading for mSCP magnitude, **opacity driven
    by model agreement** (more models agreeing -> more opaque).
@@ -19,17 +21,18 @@ Output is pushed to `docs/index.html` for GitHub Pages.
 
 ## v1 scope and known limitations
 
-- **Models:** GFS deterministic + ECMWF deterministic only.
+- **Models:** GFS, ECMWF and CMC GDPS deterministic. Any model can fail
+  for a day without stopping the run.
 - **Single valid-time snapshot.** No accumulation across forecast window.
 - **CIN correction only.** LFC factor is designed in `scp_math.py` but
   not used in v1 since LFC isn't in standard GFS GRIB output. Defer to v2.
-- **ECMWF SRH/shear approximations:** derived from coarse pressure-level
+- **ECMWF/CMC SRH/shear approximations:** derived from coarse pressure-level
   winds (1000, 925, 850, 700, 500 mb) plus 10 m wind. Surface height is
   approximated as 100 m AGL (CONUS-Plains average); terrain effects in the
-  Rockies / Appalachians will be inaccurate.
-- **Agreement layer with only 2 models is binary** (visible if both agree,
-  invisible otherwise). The transparency framework is general; once more
-  models are added it shows real gradation.
+  Rockies / Appalachians will be inaccurate. CMC also uses standard-atmosphere
+  heights for the pressure levels (ECMWF uses real geopotential height).
+- **Agreement layer is coarse with 3 models** (2 of 3 or 3 of 3). The
+  transparency framework is general; more models give finer gradation.
 
 ## File structure
 
@@ -45,6 +48,7 @@ SCP_Agreement/
 ├── scp_math.py                 # SCP formula + CIN/LFC factors + SRH derivation
 ├── gfs_fetcher.py              # Herbie-based GFS data pull
 ├── ecmwf_fetcher.py            # ECMWF Open Data pull + SRH/shear derivation
+├── cmc_fetcher.py              # CMC GDPS pull from MSC Datamart + SRH/shear derivation
 ├── render.py                   # matplotlib/cartopy map + HTML wrapper
 ├── environment.yml             # conda env spec
 └── README.md
